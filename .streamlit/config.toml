@@ -1,0 +1,7 @@
+[theme]
+headingFont = "'Instrument Serif':https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap"
+font =  "'Inter':https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap"
+primaryColor="#508757"
+backgroundColor="#272927"
+secondaryBackgroundColor="#4a504b"
+textColor="#f5f5e9"

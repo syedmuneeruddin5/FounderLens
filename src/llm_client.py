@@ -1,20 +1,57 @@
-
-# Sample LLM client for testing
-import requests
-import os
+import openai
 from dotenv import load_dotenv
-import pprint
+import os
 
 load_dotenv()
 
-api_key = os.getenv("GROQ_API_KEY")
-url = "https://api.groq.com/openai/v1/models"
+def initialize_client():
+    try:
+        client = openai.OpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.getenv("GROQ_API_KEY"),
+            max_retries=3
+        )
+        return client
+    except Exception as e:
+        print("\033[91m" + f"Error initializing OpenAI client: {e}" + "\033[0m")
+        return None
 
-headers = {
-    "Authorization": f"Bearer {api_key}",
-    "Content-Type": "application/json"
-}
+def call_llm(messages, json_mode=False, model="openai/gpt-oss-120b"):
 
-response = requests.get(url, headers=headers)
+    client = initialize_client()
+    if client is None:
+        return None
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"} if json_mode else None
+        )
+    except Exception as e:
+        print("\033[91m" + f"Error calling LLM: {e}" + "\033[0m")
+        return None
+    
+    return response.choices[0].message.content
 
-pprint.pprint(response.json(), indent=2)
+def call_llm_stream(messages, json_mode=False, model="openai/gpt-oss-120b"):
+    client = initialize_client()
+    if client is None:
+        return None
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            response_format={"type": "json_object"} if json_mode else None,
+            stream=True
+        )
+    except Exception as e:
+        print("\033[91m" + f"Error calling LLM: {e}" + "\033[0m")
+        return None
+    
+    for chunk in response:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
+# ENHANCE: Retry Mechanism, Rate Limiting
