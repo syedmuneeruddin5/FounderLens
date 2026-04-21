@@ -36,6 +36,9 @@
 ### What It Is
 A directed, adaptive interview engine that feels like a session with a knowledgeable mentor. Every question serves a purpose. Every answer feeds a downstream artifact. Nothing is generated that wasn't discussed.
 
+### Tagline
+*"The honest look your idea needs before anyone else sees it."*
+
 ### Core Value Proposition
 A first-time founder can input a rough idea and walk away with a filled Lean Canvas, a structured risk register, and an investor-ready one-pager — all generated from a 15–20 minute guided session, grounded in YC, Mom Test, and Lean Canvas frameworks.
 
@@ -125,9 +128,13 @@ All FounderCanvas data lives in `st.session_state` for the duration of a session
 
 ### conversation_history — What It Is and How It's Built
 
-`conversation_history` is an array field that lives inside the FounderCanvas. It is not a separate structure. It is built up incrementally during Stage 2: every time the founder answers a question, one entry is appended to this array. By the end of Stage 2, it contains the complete record of the interview.
+`conversation_history` is an array field that lives inside the FounderCanvas. It is built incrementally during Stage 2 — every time the founder answers a question in a cluster, one entry is appended. By the end of Stage 2 it contains the complete record of the interview.
 
-It exists for one primary purpose: the synthesis call after Stage 2 takes the full `conversation_history` as its input and extracts all FounderCanvas fields from it. Nothing else reads from it directly.
+Its primary purpose is to serve as the authoritative input to the synthesis call, which extracts all FounderCanvas fields from it. Draft field values written during Stage 2 are treated as warm cache — the synthesis call always overwrites them with authoritative values.
+
+### Draft Population During Stage 2
+
+As each cluster is evaluated, `extracted_signals` returned by the evaluation call are merged into the relevant canvas field groups immediately. These are draft values — useful for context in later cluster generation prompts, but not final. The synthesis call is authoritative and overwrites all draft values.
 
 ### Full Schema
 
@@ -206,14 +213,14 @@ canvas = {
 
     "conversation_history": [
         # Built up incrementally during Stage 2.
-        # One entry appended per founder answer.
-        # Primary input to the synthesis extraction call.
+        # One entry appended per founder answer per question in a cluster.
+        # Primary and authoritative input to the synthesis extraction call.
         # {
         #   "dimension": str,        — which of the 7 dimensions this exchange targets
         #   "question": str,         — exact question shown to the founder
         #   "question_format": str,  — open_text | multiple_choice | scale | yes_no
         #   "answer": str,           — founder's exact answer
-        #   "probe_triggered": bool  — whether a follow-up probe was asked next
+        #   "probe_triggered": bool  — whether this question was part of a probe cluster
         # }
     ],
 
@@ -227,19 +234,16 @@ canvas = {
         "founder_market_fit_risk": False
     },
 
-    "stage3_edits": [
-        # Audit trail of founder corrections in Stage 3.
-        # {
-        #   "card": str,            — which card was edited
-        #   "original_value": str,
-        #   "corrected_value": str
-        # }
-    ],
-
     "artifacts_generated": {
         "lean_canvas": False,
         "risk_register": False,
         "one_pager": False
+    },
+
+    "audio_generated": {
+        "skeptical_vc": False,
+        "target_customer": False,
+        "fellow_founder": False
     }
 }
 ```
@@ -250,11 +254,12 @@ canvas = {
 |---|---|---|
 | `idea.raw_input` | Stage 1 | Stage 2 prompt context |
 | `idea.one_liner`, `idea.problem` | Stage 1 (quick AI pre-fill) | Stage 2 starting context |
-| `conversation_history` | Stage 2 — one entry appended per exchange | Synthesis call |
-| `dimensions_covered` | Stage 2 — updated after each answer evaluation | Stage 2 exit condition |
-| All other field groups | Synthesis call (post-Stage-2, pre-Stage-3) | Stage 3 cards, Stage 4 artifacts |
-| `stage3_edits` | Stage 3 — on each founder correction | Audit trail |
+| `conversation_history` | Stage 2 — one entry per answer per cluster question | Synthesis call |
+| `dimensions_covered` | Stage 2 — updated after each cluster evaluation | Stage 2 exit condition |
+| All field groups (draft) | Stage 2 — from `extracted_signals` per cluster evaluation | Later cluster generation prompts |
+| All field groups (authoritative) | Synthesis call (post-Stage-2) | Stage 3 cards, Stage 4 artifacts |
 | `artifacts_generated` | Stage 4 — flipped to True on generation | UI download status |
+| `audio_generated` | Stage 5 — flipped to True on generation | UI audio player status |
 
 ---
 
@@ -279,9 +284,10 @@ canvas = {
 │  LLM   │  │ Artifact │   │   Audio    │
 │ Engine │  │Generator │   │  Engine    │
 │        │  │          │   │ (stretch)  │
-│Question│  │ .docx x3 │   │ 3 persona  │
-│picking │  │          │   │   clips    │
-│Synthesis   └──────────┘   └────────────┘
+│Cluster │  │ .docx x3 │   │ 3 persona  │
+│generate│  │          │   │   clips    │
+│evaluate│  └──────────┘   └────────────┘
+│Synthesis   
 │ call   │
 └────────┘
 ```
@@ -291,13 +297,13 @@ canvas = {
 | File | Responsibility |
 |---|---|
 | `app.py` | Entry point. Initializes `session_state.canvas` if absent. Reads `stage`, calls matching render function. |
-| `llm_client.py` | All OpenRouter API calls. Model-agnostic. Accepts prompt + optional JSON schema. Returns text or parsed dict. |
-| `interview_engine.py` | Stage 2 logic. Evaluates answers, picks next question, updates `dimensions_covered`, detects exit condition. |
-| `synthesis_engine.py` | Single LLM call after Stage 2. Extracts all FounderCanvas fields from `conversation_history`. |
+| `llm_client.py` | All LLM API calls. Model-agnostic. Accepts prompt + optional JSON schema. Returns text or parsed dict. |
+| `interview_engine.py` | Stage 2 logic. Generates clusters, evaluates cluster answers, applies extracted signals, updates `dimensions_covered`, detects exit condition. |
+| `synthesis_engine.py` | Single LLM call after Stage 2. Extracts authoritative FounderCanvas fields from full `conversation_history`. |
 | `artifact_generator.py` | Generates all three `.docx` files from FounderCanvas using `python-docx`. |
 | `audio_engine.py` | Stretch. Generates persona scripts and synthesizes audio via TTS provider. |
 | `ui/intake.py` | `render_intake()` — Stage 1 UI |
-| `ui/interview.py` | `render_interview()` — Stage 2 UI. One question at a time. |
+| `ui/interview.py` | `render_interview()` — Stage 2 UI. Cluster-driven, one question at a time. |
 | `ui/review.py` | `render_review()` — Stage 3 UI. 7 cards + edit flow. |
 | `ui/artifacts.py` | `render_artifacts()` — Stage 4 UI. Download buttons. |
 | `ui/audio.py` | `render_audio()` — Stage 5 UI (stretch). Audio players. |
@@ -314,7 +320,7 @@ canvas = {
 **Purpose:** Capture the founder's idea in their own words. Initialize the FounderCanvas in session_state.
 
 **UI:**
-- Clean landing page with app name and a one-line description
+- Clean landing page with app name and tagline
 - Single large text area: *"Describe your startup idea. Don't worry about being perfect — just tell us what you're trying to build and who it's for."*
 - Submit button: "Start My Validation Session"
 
@@ -323,7 +329,7 @@ canvas = {
 2. Set `canvas["idea"]["raw_input"]` to the submitted text
 3. Call LLM to pre-fill `idea.one_liner` and `idea.problem` from the raw input (temperature 0.2, quick extraction)
 4. Set `canvas["stage"] = "interview"`
-5. Streamlit reruns → Stage 2 renders
+5. Streamlit reruns — Stage 2 renders
 
 **Exit Condition:** Founder submits non-empty text.
 
@@ -331,50 +337,140 @@ canvas = {
 
 ### Stage 2 — AI Mentor Interview
 
-**Purpose:** Conduct a directed, adaptive interview across all 7 dimensions. Build `conversation_history`. Mark `dimensions_covered` as coverage is achieved. Exit when all 7 are `True`.
+**Purpose:** Conduct a directed, adaptive interview across all 7 dimensions using a cluster-based approach. Build `conversation_history`. Draft-populate canvas fields from cluster evaluations. Mark `dimensions_covered` as coverage is achieved. Exit when all 7 are `True`.
 
 **UX Feel:** Guided interview. One question at a time. Not a chat UI — each question is a distinct panel. The founder sees no dimension labels or progress percentage — it simply feels like a mentor working through topics naturally.
 
-**How the Loop Works (per submission):**
+---
 
-```
-Founder submits an answer
-  → Answer appended to canvas["conversation_history"]
-  → LLM Call 1 — Answer Evaluation:
-      Input:  current canvas state + the answer just submitted
-      Output: { "covered": bool, "probe_needed": bool, "probe_question": str | null }
-  → If covered: dimensions_covered[dimension] = True
-  → Check exit: all 7 dimensions True? → stage = "synthesis" → st.rerun()
-  → LLM Call 2 — Next Question:
-      Input:  updated canvas state
-      Output: { "question": str, "format": str, "options": list | null, "dimension": str }
-  → Next question stored in session_state
-  → st.rerun() → renders next question
-```
+#### The Cluster Model
 
-**Question Formats:**
-- `multiple_choice` — rendered as radio buttons or button group. Used when the answer space is bounded.
-- `scale` — segmented control (e.g. Daily / Weekly / Monthly / Rarely). Used for frequency or intensity.
-- `open_text` — multi-line text area. Used when evidence, narrative, or nuance is needed.
-- `yes_no` — two buttons. Always followed by a probe based on the answer.
+Questions are grouped into **clusters** — thematic batches of 2–4 questions that together cover one dimension. The AI generates a full cluster upfront in one LLM call. The founder answers questions one at a time. When the last answer in a cluster is submitted, the entire cluster is evaluated together in one LLM call.
+
+This approach reduces total API calls significantly compared to per-question evaluation, and allows the AI to compose questions that are thematically coherent within a dimension rather than generating them in isolation.
+
+**Cluster types:**
+- **Main cluster:** 2–4 questions covering one dimension. Generated at the start of each new dimension.
+- **Probe cluster:** 1–2 follow-up questions for a dimension that wasn't sufficiently covered. Generated only when the evaluation call returns `probe_needed: True`.
+
+**Cluster size rules (enforced in generation prompt):**
+- Format is decided by what the question is asking — not for variety
+- If a dimension is already partially covered by prior answers, generate fewer questions focused on the gaps only
+- Questions must feel like a natural continuation of the conversation, personalized to this founder's specific idea
 
 ---
 
-#### The 7 Dimensions — Full Question Bank
+#### Session State for Stage 2
 
-Each dimension has seed questions (asked first) and probe questions (triggered when answers are vague, hypothetical, or contradictory). The AI selects the next question based on what has been covered and the quality of recent answers.
+Beyond the canvas, Stage 2 maintains UI-layer state in `session_state` (not in the canvas):
+
+```python
+st.session_state.current_cluster = {
+    "dimension": str,           # dimension this cluster covers
+    "questions": [ ... ],       # full list of question dicts from generation call
+    "answers": [ ... ],         # parallel list, filled as founder answers
+    "current_index": int,       # which question is currently shown (0-based)
+    "is_probe": bool            # True if this is a probe cluster
+}
+# None on first load — triggers first cluster generation
+
+st.session_state.completed_clusters = []
+# List of all completed cluster dicts — used for question number tracking
+```
+
+---
+
+#### The Cluster Object
+
+```python
+cluster = {
+    "dimension": "problem_discovery",
+    "is_probe": False,
+    "questions": [
+        {
+            "id": "q1",
+            "question": str,           # personalized question text
+            "format": str,             # open_text | multiple_choice | scale | yes_no
+            "options": list | None,    # for multiple_choice and scale only
+            "placeholder": str | None, # example answer to clarify expected input
+            "helper_text": str | None, # sub-text shown below question
+            "yes_label": str | None,   # for yes_no only — replaces "Yes"
+            "no_label": str | None,    # for yes_no only — replaces "No"
+            "targets": str             # canvas field this answer maps to
+        }
+        # ... 1-3 more questions
+    ],
+    "answers": [None, None, None],     # same length as questions
+    "current_index": 0
+}
+```
+
+**Helper text and placeholder rules (enforced in generation prompt):**
+- Add `helper_text` when the question risks a vague or buzzword-heavy answer
+- Add `placeholder` when a concrete example would clarify the expected answer format — make it feel real and specific to their idea
+- For `yes_no`, write `yes_label` and `no_label` that are specific to the question context (e.g. "Seen it firsthand" / "Based on assumption") — not generic "Yes" / "No"
+- Omit `helper_text` and `placeholder` when the question is clear without them — do not overuse
+
+---
+
+#### Cluster Lifecycle
+
+```
+GENERATING
+  One LLM call produces the full cluster dict.
+  UI shows loading state.
+  Cluster stored in session_state.current_cluster → st.rerun()
+        ↓
+PRESENTING
+  UI reads current_index from cluster.
+  Renders the question at that index using correct render_* function.
+  Founder submits answer → stored in cluster["answers"][current_index].
+  current_index incremented.
+  If more questions remain → st.rerun() (stay in PRESENTING).
+  If all answered → move to EVALUATING.
+        ↓
+EVALUATING
+  One LLM call evaluates all answers in the completed cluster.
+  Returns: covered, confidence, probe_needed, probe_reason, extracted_signals.
+  extracted_signals merged into canvas draft fields.
+  dimensions_covered[dimension] updated.
+  All cluster Q&A pairs appended to conversation_history.
+  UI shows loading state during this call.
+        ↓
+DONE — three possible paths:
+
+  1. All 7 dimensions covered:
+     canvas["stage"] = "synthesis" → st.rerun() → exits Stage 2
+
+  2. Probe needed:
+     generate_probe_cluster() called (1-2 questions).
+     Result set as session_state.current_cluster.
+     Current cluster appended to completed_clusters.
+     → st.rerun() → back to PRESENTING
+
+  3. Next dimension:
+     generate_cluster() called for next uncovered dimension.
+     Current cluster appended to completed_clusters.
+     → st.rerun() → back to GENERATING
+```
+
+---
+
+#### The 7 Dimensions — Question Bank
+
+The question bank is the reference framework for cluster generation. The AI uses it to understand what needs to be covered per dimension and what question styles work well — but does **not** copy questions verbatim. Every question is personalized to the founder's specific idea.
 
 ---
 
 **Dimension 1 — Problem Discovery**
 Goal: Establish that the problem is real, painful, frequent, and observable — not assumed.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 1.1 | "How would you describe the core problem your idea solves, in one sentence?" | open_text | `idea.problem` |
 | 1.2 | "How often does your target customer run into this problem?" | scale: Daily / Weekly / Monthly / Rarely | `audience.pain_description` |
 | 1.3 | "What's the real cost of this problem not being solved — what actually happens to them?" | open_text | `audience.pain_description` |
-| 1.4 (probe) | "You mentioned [X] — is that something you've seen directly, or is it an assumption?" | multiple_choice: Seen it myself / Heard from others / Logical assumption | `founder.known_vs_guessed` |
+| 1.4 (probe) | "Is that something you've seen directly, or is it an assumption?" | yes_no | `founder.known_vs_guessed` |
 | 1.5 (probe) | "Can you describe a specific moment when this problem caused someone a real frustration?" | open_text | `audience.pain_description` |
 
 Covered when: `idea.problem` and `audience.pain_description` are populated with specific, non-hypothetical content.
@@ -384,11 +480,11 @@ Covered when: `idea.problem` and `audience.pain_description` are populated with 
 **Dimension 2 — Target Audience**
 Goal: Narrow from a broad group to a specific, nameable early adopter.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 2.1 | "If you could only sell to 10 people first, who would they be? What do they have in common?" | open_text | `audience.early_adopter_profile` |
 | 2.2 | "Are these people currently paying for any solution to this problem?" | multiple_choice: Yes, paying / Yes, using free tools / No, nothing / Not sure | `audience.willingness_to_pay` |
-| 2.3 (probe) | "You described [X group] — within that group, who feels this pain most acutely?" | open_text | `audience.primary_segment` |
+| 2.3 (probe) | "Within that group, who feels this pain most acutely?" | open_text | `audience.primary_segment` |
 | 2.4 (probe) | "How does your target customer currently describe this problem to themselves, in their own words?" | open_text | `audience.pain_description` |
 
 Covered when: `audience.primary_segment` and `audience.early_adopter_profile` are specific and distinct from a generic demographic.
@@ -398,9 +494,9 @@ Covered when: `audience.primary_segment` and `audience.early_adopter_profile` ar
 **Dimension 3 — Market & Timing**
 Goal: Establish market size signal and a credible "why now" rationale.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
-| 3.1 | "What's changed recently — in technology, behavior, or regulation — that makes this problem solvable now when it wasn't before?" | open_text | `market.timing_signal` |
+| 3.1 | "What's changed recently — in technology, behavior, or regulation — that makes this problem solvable now?" | open_text | `market.timing_signal` |
 | 3.2 | "How many people do you think have this problem, roughly?" | multiple_choice: Thousands / Hundreds of thousands / Millions / Not sure | `market.size_bucket` |
 | 3.3 (probe) | "Is there a specific trend or recent event you're riding, or has this problem always existed?" | open_text | `market.timing_signal` |
 | 3.4 (probe) | "What would need to be true about the market for this to be a significant company in 5 years?" | open_text | `market.tam_estimate` |
@@ -412,7 +508,7 @@ Covered when: `market.timing_signal` is specific (not generic like "AI is growin
 **Dimension 4 — Solution Pressure**
 Goal: Establish that the solution is meaningfully better, not incrementally different.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 4.1 | "Describe your solution in two or three sentences — what does it actually do?" | open_text | `solution.description` |
 | 4.2 | "Compared to what people do today, why is your solution meaningfully better — not slightly better?" | open_text | `solution.ten_x_claim` |
@@ -427,11 +523,11 @@ Covered when: `solution.description`, `solution.key_differentiator`, and `soluti
 **Dimension 5 — Competitive Reality**
 Goal: Establish honest awareness of alternatives and a defensible differentiation.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 5.1 | "List the top two or three things people use today to solve this problem — even if they're imperfect." | open_text | `competition.alternatives` |
 | 5.2 | "Why haven't those alternatives fully solved it?" | multiple_choice: Too expensive / Too complex / Not designed for this / People aren't aware / Other | `competition.alternatives_shortfall` |
-| 5.3 | "What's your unfair advantage — something that would be genuinely hard to copy?" | multiple_choice: Domain expertise / Proprietary data / Network effects / First-mover / Team background / Not sure yet | `competition.advantage_type` |
+| 5.3 | "What's your unfair advantage — something genuinely hard to copy?" | multiple_choice: Domain expertise / Proprietary data / Network effects / First-mover / Team background / Not sure yet | `competition.advantage_type` |
 | 5.4 (probe) | "If a well-funded startup built your exact product, what would make you still win?" | open_text | `competition.unfair_advantage` |
 
 Covered when: `competition.alternatives` has at least two entries and `competition.differentiation` is populated.
@@ -441,7 +537,7 @@ Covered when: `competition.alternatives` has at least two entries and `competiti
 **Dimension 6 — Business Model**
 Goal: Establish a credible revenue hypothesis and basic unit economics thinking.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 6.1 | "How do you expect to make money — what's the most natural revenue model?" | multiple_choice: Subscription / One-time purchase / Commission / Freemium / Usage-based / Not sure | `business_model.revenue_type` |
 | 6.2 | "Who is actually paying — the end user, a business, or someone else?" | multiple_choice: The user pays / A business pays / Advertisers pay / Not sure | `business_model.who_pays` |
@@ -456,7 +552,7 @@ Covered when: `business_model.revenue_type`, `business_model.who_pays`, and `bus
 **Dimension 7 — Founder-Market Fit & Risk**
 Goal: Surface credibility signals and the riskiest unvalidated assumption.
 
-| # | Question | Format | Field Targeted |
+| # | Reference Question | Format | Field Targeted |
 |---|---|---|---|
 | 7.1 | "Why are you the right person to build this? What do you know or have access to that others don't?" | open_text | `founder.background_relevance` |
 | 7.2 | "What's the single assumption your whole idea rests on — the one thing that, if wrong, kills this?" | open_text | `risks[]` (is_riskiest: True) |
@@ -469,25 +565,110 @@ Covered when: `founder.background_relevance`, at least one `risks[]` entry, and 
 ---
 
 #### Stage 2 Exit Condition
-All 7 values in `dimensions_covered` are `True`. Checked after every answer evaluation. Minimum ~12 exchanges, maximum ~20. Coverage quality — not question count — is the trigger.
+All 7 values in `dimensions_covered` are `True`. Checked after every cluster evaluation. Total questions across all clusters: minimum ~12, maximum ~20. Coverage quality — not question count — is the trigger.
 
 #### Stage 2 Adaptive Rules (enforced in system prompt)
-- If a founder gives a hypothetical answer → probe for evidence before marking covered
-- If a founder contradicts an earlier answer → surface the contradiction before moving on
-- If a dimension is already clearly addressed by a prior answer → skip its seed question and mark it covered
-- Never ask two questions in one turn
-- Never refer to "dimensions", "frameworks", or "Lean Canvas" by name — the founder should feel like they're speaking with a mentor, not filling a rubric
+- Personalize every question to this founder's specific idea — do not copy reference questions verbatim
+- If a dimension is already partially covered by prior cluster answers, generate fewer questions focused only on gaps
+- If answers are vague or hypothetical, mark `probe_needed: True` in evaluation — do not mark a dimension covered on weak signal
+- Never refer to "dimensions", "clusters", "frameworks", or "Lean Canvas" by name
+- Questions must feel like a natural continuation of the conversation
+
+---
+
+#### LLM Calls in Stage 2
+
+| Call | When | Temperature | Input | Output |
+|---|---|---|---|---|
+| Generate cluster | Start of each new dimension | 0.7 | canvas summary, dimensions_covered, conversation history, question bank | Full cluster dict with questions |
+| Generate probe cluster | When evaluation returns `probe_needed: True` | 0.7 | dimension, probe_reason, prior exchanges for that dimension | Small cluster dict (1-2 questions) |
+| Evaluate cluster | After all answers in a cluster are submitted | 0.3 | All Q&A pairs from cluster, prior signals for that dimension | covered, confidence, probe_needed, probe_reason, extracted_signals |
+
+**Total API calls — worst case (all dimensions probe once):** 3 calls × 7 dimensions + 1 synthesis = 22 calls
+**Total API calls — best case (no probes):** 2 calls × 7 dimensions + 1 synthesis = 15 calls
+
+Both are well within a 30 requests/minute rate limit even if the interview runs quickly.
+
+---
+
+#### Cluster Evaluation Output Schema
+
+```json
+{
+  "dimension": "problem_discovery",
+  "covered": true,
+  "confidence": "high",
+  "probe_needed": false,
+  "probe_reason": null,
+  "extracted_signals": {
+    "idea": {
+      "problem": "str | null",
+      "why_now": "str | null"
+    },
+    "audience": {
+      "primary_segment": "str | null",
+      "early_adopter_profile": "str | null",
+      "pain_description": "str | null",
+      "current_alternatives": "str | null",
+      "willingness_to_pay": "str | null"
+    },
+    "market": {
+      "tam_estimate": "str | null",
+      "size_bucket": "str | null",
+      "timing_signal": "str | null",
+      "market_signal_strength": "str | null"
+    },
+    "solution": {
+      "description": "str | null",
+      "key_differentiator": "str | null",
+      "ten_x_claim": "str | null",
+      "mvp_scope": "str | null"
+    },
+    "competition": {
+      "alternatives": "list | null",
+      "alternatives_shortfall": "str | null",
+      "differentiation": "str | null",
+      "unfair_advantage": "str | null",
+      "advantage_type": "str | null"
+    },
+    "business_model": {
+      "revenue_type": "str | null",
+      "who_pays": "str | null",
+      "price_bucket": "str | null",
+      "cost_structure": "str | null",
+      "channels": "str | null",
+      "key_metrics": "str | null"
+    },
+    "founder": {
+      "background_relevance": "str | null",
+      "known_vs_guessed": "str | null",
+      "validation_done": "str | null",
+      "validation_plan": "str | null"
+    },
+    "risks": [
+      {
+        "assumption": "str",
+        "risk_level": "high | medium | low",
+        "validation_method": "str | null",
+        "is_riskiest": "bool"
+      }
+    ]
+  }
+}
+```
+
+`extracted_signals` uses only non-null values to update canvas draft fields. The nested structure mirrors the canvas field groups exactly, making the merge a direct recursive update.
 
 ---
 
 ### Stage 3 — Synthesis Review
 
-**Purpose:** Extract the full FounderCanvas from the conversation in one structured LLM call. Render it as 7 editable cards. Let the founder correct any misunderstandings before artifact generation.
+**Purpose:** Extract the authoritative FounderCanvas from the full conversation in one structured LLM call. Render it as 7 editable cards. Let the founder correct any misunderstandings before artifact generation.
 
 **Synthesis Call (runs immediately when stage becomes "synthesis" — no UI shown during this):**
 - Input: full `conversation_history` array + FounderCanvas schema
 - Prompt: "Extract all fields from this conversation into this exact schema. Use null where absent — do not invent."
-- Output: fully populated FounderCanvas field groups
+- Output: fully populated FounderCanvas field groups — overwrites all draft values from Stage 2
 - Canvas updated in session_state, `stage = "review"`, Streamlit reruns into Stage 3 UI
 
 **Stage 3 UI — 7 Cards:**
@@ -507,7 +688,6 @@ All 7 values in `dimensions_covered` are `True`. Checked after every answer eval
 - Founder types correction in a text input below the card
 - LLM call interprets the correction, returns updated field values for that card only
 - Canvas updated in session_state for the relevant fields
-- Edit logged to `stage3_edits[]`
 - Card re-renders immediately — no confirmation step
 
 **Exit Condition:** Founder clicks "Looks good — generate my artifacts."
@@ -597,6 +777,7 @@ Each section prompt takes raw field values and returns 2–4 sentences of polish
 2. Script passed to TTS provider (provider selected in Phase 6)
 3. Audio returned as bytes, stored in `st.session_state` for playback
 4. Streamlit `st.audio()` widget plays each clip
+5. `audio_generated[persona]` flag flipped to `True` in canvas on completion
 
 **Stage 5 UI:**
 - Three persona cards, each with a name, brief description, and an audio player
@@ -617,30 +798,42 @@ Founder submits raw idea text
 → st.rerun()
 
 
-STAGE 2 — INTERVIEW (Streamlit rerun loop)
+STAGE 2 — INTERVIEW (cluster loop)
 ────────────────────────────────────────────────
-UI renders current question from session_state
+On first load:
+→ generate_cluster(canvas) → first cluster stored in session_state
+→ st.rerun()
 
-Founder submits answer
-→ Answer appended to conversation_history
-→ LLM Call 1 — Answer Evaluation:
-    Input:  canvas state + answer
-    Output: { covered, probe_needed, probe_question }
-→ If covered: dimensions_covered[dimension] = True
-→ Check: all 7 True? → stage = "synthesis" → st.rerun() → exits loop
-→ LLM Call 2 — Next Question:
-    Input:  updated canvas state
-    Output: { question, format, options, dimension }
-→ Next question stored in session_state
-→ st.rerun() → renders next question
+Per question render:
+→ UI reads current_index from current_cluster
+→ Renders question using correct render_* function
+→ Founder submits answer
+→ Answer stored in cluster["answers"][current_index]
+→ current_index incremented
+→ If more questions remain → st.rerun() (next question)
+→ If cluster complete → move to evaluation
+
+Per cluster evaluation:
+→ evaluate_cluster(canvas, cluster) called
+→ extracted_signals merged into canvas draft fields
+→ dimensions_covered[dimension] updated
+→ All Q&A pairs appended to conversation_history
+→ cluster appended to completed_clusters
+
+→ is_complete(canvas)?
+    True  → canvas["stage"] = "synthesis" → st.rerun()
+    False → probe_needed?
+        True  → generate_probe_cluster() → st.rerun()
+        False → generate_cluster() (next dimension) → st.rerun()
 
 
 SYNTHESIS — INTERNAL (no UI)
 ────────────────────────────────────────────────
 Single LLM call:
   Input:  full conversation_history + FounderCanvas schema
-  Output: all field groups populated
-→ Canvas updated with extracted fields
+  Output: all field groups authoritatively populated
+          (overwrites Stage 2 draft values)
+→ Canvas updated in session_state
 → stage = "review"
 → st.rerun()
 
@@ -652,7 +845,6 @@ UI renders 7 cards from canvas field groups
 For each founder edit:
 → LLM call: interpret correction → updated fields for that card
 → Relevant canvas fields updated in session_state
-→ Edit logged to stage3_edits[]
 → Card re-renders
 
 Founder confirms → stage = "complete" → st.rerun()
@@ -662,14 +854,15 @@ STAGE 4 — ARTIFACT GENERATION
 ────────────────────────────────────────────────
 Lean Canvas:
   → field mapping → python-docx table → bytes → download button
+  → artifacts_generated["lean_canvas"] = True
 
 Risk Register:
   → risks[] array → python-docx table → bytes → download button
+  → artifacts_generated["risk_register"] = True
 
 One-Page Pitch:
   → LLM prose call per section → python-docx narrative → bytes → download button
-
-artifacts_generated flags updated as each completes
+  → artifacts_generated["one_pager"] = True
 
 
 STAGE 5 — AUDIO (STRETCH)
@@ -677,6 +870,7 @@ STAGE 5 — AUDIO (STRETCH)
 For each of 3 personas:
 → LLM call generates 45–60 second script
 → TTS provider synthesizes audio → bytes stored in session_state
+→ audio_generated[persona] = True
 → st.audio() widget renders player
 ```
 
@@ -685,21 +879,24 @@ For each of 3 personas:
 ## 8. Codebase Structure
 
 ```
-FounderLens/
+founderlens/
 │
 ├── app.py                    # Entry point. Initializes session_state.canvas.
 │                             # Reads stage, calls matching render function.
 │
-├── llm_client.py             # All OpenRouter API calls.
+├── llm_client.py             # All LLM API calls. Model-agnostic.
 │                             # call_llm(prompt, schema=None, temperature=0.7)
 │                             # Returns str (free text) or dict (parsed JSON).
 │
 ├── interview_engine.py       # Stage 2 logic.
-│                             # evaluate_answer(canvas, answer) → dict
-│                             # get_next_question(canvas) → dict
-│                             # is_interview_complete(canvas) → bool
+│                             # generate_cluster(canvas) → dict
+│                             # generate_probe_cluster(canvas, dimension, probe_reason) → dict
+│                             # evaluate_cluster(canvas, cluster) → dict
+│                             # is_complete(canvas) → bool
+│                             # apply_extracted_signals(canvas, signals) → None
+│                             # build_canvas_summary(canvas) → str
 │
-├── synthesis_engine.py       # Post-Stage-2 extraction.
+├── synthesis_engine.py       # Post-Stage-2 authoritative extraction.
 │                             # extract_canvas(canvas) → updated canvas dict
 │
 ├── artifact_generator.py     # All .docx generation.
@@ -712,9 +909,16 @@ FounderLens/
 │                             # synthesize(script) → bytes
 │
 ├── prompts.py                # All prompt templates as string constants.
-│                             # INTERVIEW_SYSTEM, NEXT_QUESTION, SYNTHESIS,
-│                             # CARD_CORRECTION, ONE_PAGER_SECTION,
-│                             # PERSONA_SKEPTICAL_VC, PERSONA_TARGET_CUSTOMER,
+│                             # INTERVIEW_SYSTEM
+│                             # GENERATE_CLUSTER_PROMPT
+│                             # GENERATE_PROBE_CLUSTER_PROMPT
+│                             # EVALUATE_CLUSTER_PROMPT
+│                             # QUESTION_BANK
+│                             # SYNTHESIS
+│                             # CARD_CORRECTION
+│                             # ONE_PAGER_SECTION
+│                             # PERSONA_SKEPTICAL_VC
+│                             # PERSONA_TARGET_CUSTOMER
 │                             # PERSONA_FELLOW_FOUNDER
 │
 ├── ui/
@@ -725,7 +929,7 @@ FounderLens/
 │   └── audio.py              # render_audio() — stretch
 │
 ├── requirements.txt
-└── .env                      # OPENROUTER_API_KEY, OPENROUTER_MODEL (gitignored)
+└── .env                      # API keys (gitignored)
 ```
 
 **Routing in app.py:**
@@ -746,6 +950,10 @@ def initialize_canvas():
                   "solution": None, "why_now": None },
         "audience": { ... },
         # ... all field groups at defaults
+        "conversation_history": [],
+        "dimensions_covered": { ... all False },
+        "artifacts_generated": { "lean_canvas": False, "risk_register": False, "one_pager": False },
+        "audio_generated": { "skeptical_vc": False, "target_customer": False, "fellow_founder": False }
     }
 
 if "canvas" not in st.session_state:
@@ -787,6 +995,7 @@ def call_llm(
     Returns str if schema is None (free text).
     Returns parsed dict if schema is provided (validated JSON).
     Raises on API error or JSON parse failure.
+    Retries once with JSON-only instruction on parse failure.
     """
 ```
 
@@ -795,8 +1004,9 @@ def call_llm(
 | Call | Temperature | Output | Used In |
 |---|---|---|---|
 | Stage 1 pre-fill | 0.2 | dict | Stage 1 on submit |
-| Answer evaluation | 0.3 | dict `{covered, probe_needed, probe_question}` | Stage 2 per answer |
-| Next question | 0.5 | dict `{question, format, options, dimension}` | Stage 2 per turn |
+| Generate cluster | 0.7 | dict (full cluster) | Stage 2 per dimension |
+| Generate probe cluster | 0.7 | dict (small cluster) | Stage 2 when probe needed |
+| Evaluate cluster | 0.3 | dict (evaluation result + extracted_signals) | Stage 2 per cluster completion |
 | Canvas extraction | 0.2 | dict (full canvas fields) | Synthesis |
 | Card correction | 0.3 | dict (partial canvas fields) | Stage 3 per edit |
 | One-pager prose | 0.8 | str (2–4 sentence paragraph) | Stage 4 per section |
@@ -805,10 +1015,10 @@ def call_llm(
 ### Environment Configuration
 
 ```
-OPENROUTER_API_KEY=your_key_here
-OPENROUTER_MODEL=anthropic/claude-sonnet-4   # any OpenRouter-compatible model ID
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-TTS_PROVIDER=gtts                             # set during Phase 6
+API_KEY=your_key_here
+MODEL=model-id          # any OpenAI-compatible model string
+BASE_URL=https://...    # provider base URL
+TTS_PROVIDER=gtts       # set during Phase 6
 ```
 
 ---
@@ -825,21 +1035,38 @@ All prompt text lives in `prompts.py` as string constants. Logic files import an
 Must establish:
 - AI is a startup mentor — direct, challenging, curious, never cheerleading
 - Tone follows Mom Test principles: specific, evidence-seeking, about customer life
-- One question per turn — no exceptions
-- Never mention "Lean Canvas", "Mom Test", "YC", or "dimensions" by name
+- Personalize every question to this founder's specific idea — never copy templates verbatim
+- Never mention "Lean Canvas", "Mom Test", "YC", "dimensions", or "clusters" by name
 - Never ask for information already present in the conversation history
-- Probe when answers are vague or hypothetical before marking a dimension covered
 
 ---
 
-### NEXT_QUESTION — Question Selection
-**Used in:** Stage 2, after each answer evaluation.
+### GENERATE_CLUSTER_PROMPT — Cluster Generation
+**Used in:** `generate_cluster()` at the start of each new dimension.
 
-Input context: current canvas state, conversation_history, dimensions_covered
+Input context: canvas summary, dimensions_covered, conversation history, question bank
 
-Must output: `{ "question": str, "format": str, "options": list | null, "dimension": str, "is_probe": bool }`
+Must output: full cluster dict with 2–4 personalized questions, correct formats, helper text and placeholders only where warranted, specific yes/no labels
 
-Must enforce: never repeat a question; prioritize dimensions with no coverage; never combine two questions into one.
+---
+
+### GENERATE_PROBE_CLUSTER_PROMPT — Probe Generation
+**Used in:** `generate_probe_cluster()` when evaluation returns `probe_needed: True`.
+
+Input context: dimension, probe_reason, prior Q&A exchanges for that dimension
+
+Must output: small cluster dict with 1–2 focused probe questions that directly address the gap
+
+---
+
+### EVALUATE_CLUSTER_PROMPT — Cluster Evaluation
+**Used in:** `evaluate_cluster()` after all cluster answers are submitted.
+
+Input context: all Q&A pairs from the cluster, prior signals already known for that dimension
+
+Must output: evaluation result with `covered`, `confidence`, `probe_needed`, `probe_reason`, and `extracted_signals` nested by canvas field group
+
+Must enforce: use `null` for absent fields — never invent; extract only what was actually said
 
 ---
 
@@ -848,9 +1075,9 @@ Must enforce: never repeat a question; prioritize dimensions with no coverage; n
 
 Input context: full `conversation_history` + FounderCanvas schema
 
-Must output: all FounderCanvas field groups as a valid dict matching the schema.
+Must output: all FounderCanvas field groups authoritatively populated.
 
-Must enforce: use `null` for absent fields — never invent. Extract what was actually said. Do not reframe answers into a more optimistic version.
+Must enforce: use `null` for absent fields — never invent. Overwrite any draft values. Extract what was actually said — do not reframe into a more optimistic version.
 
 **This is the most critical prompt in the application.** Errors here cascade to every artifact. It requires the most iteration and testing time of any prompt in the system.
 
@@ -901,16 +1128,14 @@ Deliverables:
 ---
 
 ### Phase 2 — Conversation Engine
-**Goal:** Stage 2 fully functional end-to-end. A complete interview can be run in the app.
+**Goal:** Stage 2 fully functional end-to-end using cluster architecture. A complete interview can be run in the app.
 
 Deliverables:
-- `llm_client.py` working against OpenRouter
-- `INTERVIEW_SYSTEM` and `NEXT_QUESTION` prompt constants written and iterated
-- `interview_engine.py`: `evaluate_answer()`, `get_next_question()`, `is_interview_complete()` all working
-- `ui/interview.py`: question renders correctly per format type
-- Full interview loop completes and transitions to synthesis stage
-
-Note: Two LLM calls per answer (evaluate + next question) may be combined into one call returning both outputs, to reduce latency. Evaluate during Phase 2.
+- `INTERVIEW_SYSTEM`, `GENERATE_CLUSTER_PROMPT`, `GENERATE_PROBE_CLUSTER_PROMPT`, `EVALUATE_CLUSTER_PROMPT`, and `QUESTION_BANK` constants written and iterated
+- `interview_engine.py`: `generate_cluster()`, `generate_probe_cluster()`, `evaluate_cluster()`, `apply_extracted_signals()`, `is_complete()`, `build_canvas_summary()` all working
+- `ui/interview.py`: cluster-driven question rendering, one question at a time, correct render_* function per format
+- Full interview loop completes across all 7 dimensions and transitions to synthesis stage
+- Error handling: JSON parse retry, empty cluster guard
 
 ---
 
@@ -919,9 +1144,9 @@ Note: Two LLM calls per answer (evaluate + next question) may be combined into o
 
 Deliverables:
 - `SYNTHESIS` and `CARD_CORRECTION` prompt constants written and iterated
-- `synthesis_engine.py`: extraction call populates canvas correctly from conversation
-- `ui/review.py`: 7 cards render from canvas; edit flow updates canvas and re-renders the relevant card
-- Retry logic on synthesis call in case of JSON parse failure
+- `synthesis_engine.py`: extraction call populates canvas authoritatively, overwrites draft values
+- `ui/review.py`: 7 cards render from canvas fields, edit flow calls correction LLM and re-renders card
+- Retry logic on synthesis call in case of JSON parse failure (up to 2 retries)
 
 ---
 
@@ -931,7 +1156,7 @@ Deliverables:
 Deliverables:
 - `ONE_PAGER_SECTION` prompt constant
 - `artifact_generator.py`: all three generation functions returning valid `.docx` bytes
-- `ui/artifacts.py`: download buttons wired to generated bytes
+- `ui/artifacts.py`: download buttons wired to generated bytes, `artifacts_generated` flags updated
 - Tested against at least two different completed canvases
 
 ---
@@ -940,10 +1165,10 @@ Deliverables:
 **Goal:** Full end-to-end flow working on Streamlit Cloud. Edge cases handled.
 
 Deliverables:
-- End-to-end session tested: Stage 1 → Stage 4
+- End-to-end session tested: Stage 1 through Stage 4
 - Edge cases handled: very short answers, single-word answers, contradictions, null fields after synthesis
 - UI polished: consistent styling, loading spinners, error messages
-- Session loss warning shown in UI: "Don't close this tab until you've downloaded your artifacts"
+- Session loss warning shown in UI once artifacts are ready
 - Deployed to Streamlit Cloud with API key in Streamlit Secrets
 
 ---
@@ -955,6 +1180,7 @@ Deliverables:
 - TTS provider selected and integrated in `audio_engine.py`
 - Three persona prompt constants written
 - `ui/audio.py`: three audio players rendering and playing correctly
+- `audio_generated` flags updated in canvas as each clip is generated
 
 ---
 
@@ -964,16 +1190,16 @@ Deliverables:
 
 | Decision | Status | Due |
 |---|---|---|
-| Primary OpenRouter model | Open — interface is model-agnostic | Before Phase 2 |
+| Primary model | Open — interface is model-agnostic | Before Phase 2 |
 | TTS provider (gTTS vs ElevenLabs vs other) | Intentionally deferred | Phase 6 |
-| Combine evaluate + next-question into single LLM call | To be evaluated for latency | Phase 2 |
 
 ### Known Constraints
 
-- **Two LLM calls per Stage 2 answer:** Each answer triggers an evaluation call and a next-question call. On slower models this may feel sluggish. Consider merging into one call that returns `{ covered, probe_needed, next_question, format, options, dimension }` — reduces latency by half per turn.
-- **Synthesis call is a single point of failure:** If the extraction prompt fails to produce valid JSON matching the schema, Stage 3 cannot render. Build retry logic (up to 2 retries) and a fallback partial-extraction path that renders cards with whatever fields were successfully extracted.
-- **Session loss on tab close:** All state lives in `st.session_state`. Closing the browser tab loses the session permanently. Communicate this clearly in the UI — show a persistent reminder once artifacts are available to download before leaving.
-- **Artifact bytes in session_state:** Generated `.docx` bytes are held in session_state for the download buttons. This is fine for typical document sizes. If memory becomes a concern in later phases, generate on-demand rather than caching.
+- **Rate limits:** Cluster architecture reduces Stage 2 to 15–22 total LLM calls across the full interview (best case: 15, worst case with all probes: 22). This is well within a 30 requests/minute limit even for fast sessions.
+- **Synthesis call is a single point of failure:** If the extraction prompt fails to produce valid JSON, Stage 3 cannot render. Build retry logic (up to 2 retries) and a fallback partial-extraction path that renders cards with whatever fields were successfully extracted.
+- **Draft vs authoritative values:** Canvas field groups are partially populated during Stage 2 as draft values from `extracted_signals`. The synthesis call always overwrites these. Nothing in Stage 3 or Stage 4 should read from canvas fields before synthesis has completed.
+- **Session loss on tab close:** All state lives in `st.session_state`. Closing the browser tab loses the session permanently. Show a persistent reminder once artifacts are available to download before leaving.
+- **Artifact bytes in session_state:** Generated `.docx` bytes and audio bytes are held in session_state for download and playback buttons. Fine for typical sizes. If memory becomes a concern, generate on-demand rather than caching.
 
 ---
 

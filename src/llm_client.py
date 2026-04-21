@@ -16,36 +16,44 @@ def initialize_client():
         print("\033[91m" + f"Error initializing OpenAI client: {e}" + "\033[0m")
         return None
 
-def call_llm(messages, json_mode=False, model="openai/gpt-oss-120b"):
+def call_llm(messages, json_mode=False, model="openai/gpt-oss-120b", temperature=None):
 
     client = initialize_client()
     if client is None:
         return None
     
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"} if json_mode else None
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_object"} if json_mode else None
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        
+        response = client.chat.completions.create(**kwargs)
     except Exception as e:
         print("\033[91m" + f"Error calling LLM: {e}" + "\033[0m")
         return None
     
     return response.choices[0].message.content
 
-def call_llm_stream(messages, json_mode=False, model="openai/gpt-oss-120b"):
+def call_llm_stream(messages, json_mode=False, model="openai/gpt-oss-120b", temperature=None):
     client = initialize_client()
     if client is None:
         return None
     
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"} if json_mode else None,
-            stream=True
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "response_format": {"type": "json_object"} if json_mode else None,
+            "stream": True
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        
+        response = client.chat.completions.create(**kwargs)
     except Exception as e:
         print("\033[91m" + f"Error calling LLM: {e}" + "\033[0m")
         return None

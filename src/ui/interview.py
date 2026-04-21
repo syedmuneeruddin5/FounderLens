@@ -1,4 +1,10 @@
 import streamlit as st
+from interview_engine import (
+    generate_cluster,
+    generate_probe_cluster,
+    evaluate_cluster,
+    is_complete,
+)
 
 def _render_question_header(question, question_number=None):
     # Renders the mentor-style question card header common to all input types
@@ -76,13 +82,7 @@ def render_multiple_choice( question, options, key, question_number=None, helper
 
     return None
 
-def render_scale(
-    question,
-    options,
-    key,
-    question_number=None,
-    helper_text=None,
-):
+def render_scale(question, options, key, question_number=None, helper_text=None):
     # Renders a segmented-control scale question panel
     # Used for: frequency, intensity, or ordered-spectrum answers where the ordered
     # nature of the scale should feel natural (e.g. Daily → Rarely, Strong → None).
@@ -132,163 +132,153 @@ def render_yes_no( question, key, question_number=None, helper_text=None, yes_la
     return None
 
 
-# ─────────────────────────────────────────────
-# STAGE 2 ENTRY POINT
-# ─────────────────────────────────────────────
+# ─── Dispatcher ───────────────────────────────────────────────────────────────
 
-def render_interview():
-    # Entry point for Stage 2 — AI Mentor Interview
-    # Reads the current question from `st.session_state` and delegates rendering
-    # to the appropriate input-type function
-    # Interview engine populates `session_state.current_question` with dict form:
-    # {"question": str, "format": "open_text"|"multiple_choice"|"scale"|"yes_no", 
-    #  "options": list[str]|None, "dimension": str, "number": int|None}
-
-    st.title("FounderLens 🚀")
-    st.markdown( '<h3 style="letter-spacing: 0.8px;">Let\'s pressure-test your idea.</h3>', unsafe_allow_html=True)
-    st.markdown( "Answer honestly — vague answers won't move you forward. There are no right answers, only evidence.")
-    st.divider()
-
-    # ── Current question payload (populated by interview engine) ───────────
-    current_q = st.session_state.get("current_question")
-
-    if current_q is None:
-        # Interview engine not yet wired — show a holding state
-        st.info("The interview engine is initialising your first question…")
-        return
-
-    fmt = current_q.get("format", "open_text")
-    question_text = current_q.get("question", "")
-    options = current_q.get("options") or []
-    q_number = current_q.get("number")
-
-    # ── Dispatch to the correct input-type renderer ────────────────────────
-    answer = None
+def _dispatch_question(question_dict, key, question_number):
+    fmt = question_dict.get("format")
+    q   = question_dict.get("question", "")
 
     if fmt == "open_text":
-        answer = render_open_text(
-            question=question_text,
-            key=f"q_{q_number}_{fmt}",
-            question_number=q_number,
+        return render_open_text(
+            question=q,
+            key=key,
+            placeholder=question_dict.get("placeholder") or "Share your thoughts here...",
+            question_number=question_number,
+            helper_text=question_dict.get("helper_text"),
         )
-
     elif fmt == "multiple_choice":
-        answer = render_multiple_choice(
-            question=question_text,
-            options=options,
-            key=f"q_{q_number}_{fmt}",
-            question_number=q_number,
+        return render_multiple_choice(
+            question=q,
+            options=question_dict.get("options", []),
+            key=key,
+            question_number=question_number,
+            helper_text=question_dict.get("helper_text"),
         )
-
     elif fmt == "scale":
-        answer = render_scale(
-            question=question_text,
-            options=options,
-            key=f"q_{q_number}_{fmt}",
-            question_number=q_number,
+        return render_scale(
+            question=q,
+            options=question_dict.get("options", []),
+            key=key,
+            question_number=question_number,
+            helper_text=question_dict.get("helper_text"),
         )
-
     elif fmt == "yes_no":
-        answer = render_yes_no(
-            question=question_text,
-            key=f"q_{q_number}_{fmt}",
-            question_number=q_number,
+        return render_yes_no(
+            question=q,
+            key=key,
+            question_number=question_number,
+            helper_text=question_dict.get("helper_text"),
+            yes_label=question_dict.get("yes_label") or "Yes",
+            no_label=question_dict.get("no_label") or "No",
         )
+    else:
+        st.error(f"Unknown question format: {fmt}")
+        return None
 
-    # ── Hand the answer back to the interview engine (placeholder) ─────────
-    if answer is not None:
-        # ENHANCE: Replace this stub with interview_engine.handle_answer(answer)
-        # which will: append to conversation_history, evaluate coverage, pick
-        # next question or trigger synthesis → st.rerun()
-        st.session_state["last_answer"] = answer
+
+# ─── Main Entry Point ─────────────────────────────────────────────────────────
+
+def render_interview():
+    canvas = st.session_state.canvas
+
+    # Initialize interview-local state on first entry
+    if "current_cluster" not in st.session_state:
+        st.session_state.current_cluster = None
+        st.session_state.completed_clusters = []
+        st.session_state.interview_ready = False
+
+    # Generate first cluster if none exists yet
+    if st.session_state.current_cluster is None:
+        with st.spinner("Preparing your first question..."):
+            try:
+                cluster = generate_cluster(canvas)
+            except Exception as e:
+                st.error(f"Couldn't generate the first question. Please refresh and try again.\n\n_{e}_")
+                return
+        st.session_state.current_cluster = cluster
+        st.session_state.interview_ready = True
         st.rerun()
 
+    cluster = st.session_state.current_cluster
+    idx = cluster["current_index"]
 
-# ─────────────────────────────────────────────
-# DEMO: Sample Render Interview
-# ─────────────────────────────────────────────
+    # Global question counter — computed from completed clusters + progress in current
+    total_answered = sum(
+        len(c["answers"]) for c in st.session_state.completed_clusters
+    ) + idx
+    question_number = total_answered + 1
 
-def sample_render_interview():
-    # A demonstration flow of the 4 interview input components
-    # Cycles through each input type using sample questions from the PRD
-    # to showcase the layout and UX
-    
-    if "demo_step" not in st.session_state:
-        st.session_state.demo_step = 0
-        st.session_state.demo_answers = {}
+    question_dict = cluster["questions"][idx]
 
-    with st.container(gap='xxsmall'):
-        st.title("Interview UI Preview 🛡️")
-        st.markdown("Experience the modular input layouts designed for the AI Mentor Stage.")
-        st.divider()
+    # Key is globally unique: dimension + position + how many clusters are done
+    key = f"q_{cluster['dimension']}_{idx}_{len(st.session_state.completed_clusters)}"
 
-    step = st.session_state.demo_step
+    answer = _dispatch_question(question_dict, key, question_number)
 
-    if step == 0:
-        # Open Text Example (PRD 1.1)
-        ans = render_open_text(
-            question="How would you describe the core problem your idea solves, in one sentence?",
-            key="demo_open",
-            question_number=1,
-            placeholder="e.g., Local farmers struggle to find consistent buyers for seasonal produce...",
-            helper_text="Avoid buzzwords—describe the pain exactly as your customer experiences it."
-        )
-        if ans:
-            st.session_state.demo_answers["problem"] = ans
-            st.session_state.demo_step = 1
-            st.rerun()
+    if answer is None:
+        return
 
-    elif step == 1:
-        # Scale Example (PRD 1.2)
-        ans = render_scale(
-            question="How often does your target customer run into this problem?",
-            options=["Daily", "Weekly", "Monthly", "Rarely"],
-            key="demo_scale",
-            question_number=2,
-            helper_text="Establish the frequency and urgency of the pain point."
-        )
-        if ans:
-            st.session_state.demo_answers["frequency"] = ans
-            st.session_state.demo_step = 2
-            st.rerun()
+    # Store answer and advance index
+    cluster["answers"][idx] = answer
+    cluster["current_index"] += 1
 
-    elif step == 2:
-        # Multiple Choice Example (PRD 2.2)
-        ans = render_multiple_choice(
-            question="Are these people currently paying for any solution to this problem?",
-            options=["Yes, paying", "Yes, using free tools", "No, nothing", "Not sure"],
-            key="demo_mc",
-            question_number=3,
-            helper_text="This establishes if there is already a 'willingness to pay' in the market."
-        )
-        if ans:
-            st.session_state.demo_answers["current_behavior"] = ans
-            st.session_state.demo_step = 3
-            st.rerun()
+    # More questions remain in this cluster — show next
+    if cluster["current_index"] < len(cluster["questions"]):
+        st.rerun()
+        return
 
-    elif step == 3:
-        # Yes/No Example (PRD 1.4-ish)
-        ans = render_yes_no(
-            question="Is your understanding of this problem based on personal experience?",
-            yes_label="Yes, seen it directly",
-            no_label="No, logical assumption",
-            key="demo_yn",
-            question_number=4,
-            helper_text="We distinguish between first-hand evidence and second-hand hypotheses."
-        )
-        if ans:
-            st.session_state.demo_answers["evidence_type"] = ans
-            st.session_state.demo_step = 4
-            st.rerun()
+    # All cluster questions answered — evaluate
+    with st.spinner("Thinking about your answers..."):
+        try:
+            result = evaluate_cluster(canvas, cluster)
+        except Exception as e:
+            st.error(f"Something went wrong evaluating your answers. Please refresh and try again.\n\n_{e}_")
+            return
 
-    else:
-        # Completion State
-        st.balloons()
-        st.success("Modular Input Demo Complete!")
-        st.write("### Mock Data Path Collected:")
-        st.json(st.session_state.demo_answers)
-        
-        if st.button("Reset Demo Flow", use_container_width=True):
-            st.session_state.demo_step = 0
-            st.session_state.demo_answers = {}
-            st.rerun()
+    # Append all Q&A to conversation_history
+    for i, q in enumerate(cluster["questions"]):
+        canvas["conversation_history"].append({
+            "dimension": cluster["dimension"],
+            "question": q["question"],
+            "question_format": q["format"],
+            "answer": cluster["answers"][i],
+            "probe_triggered": cluster.get("is_probe", False),
+        })
+
+    # Update dimension coverage
+    canvas["dimensions_covered"][result["dimension"]] = result.get("covered", False)
+
+    # Archive this cluster
+    st.session_state.completed_clusters.append(cluster)
+
+    # ── Decide next step ──────────────────────────────────────────────────────
+
+    if is_complete(canvas):
+        canvas["stage"] = "synthesis"
+        st.rerun()
+        return
+
+    if result.get("probe_needed"):
+        with st.spinner("Following up on something you mentioned..."):
+            try:
+                probe = generate_probe_cluster(
+                    canvas,
+                    result["dimension"],
+                    result.get("probe_reason", ""),
+                )
+            except Exception as e:
+                st.error(f"Couldn't generate the follow-up question. Please refresh and try again.\n\n_{e}_")
+                return
+        st.session_state.current_cluster = probe
+        st.rerun()
+        return
+
+    # Move to next dimension
+    with st.spinner("Moving to the next topic..."):
+        try:
+            next_cluster = generate_cluster(canvas)
+        except Exception as e:
+            st.error(f"Couldn't generate the next question. Please refresh and try again.\n\n_{e}_")
+            return
+    st.session_state.current_cluster = next_cluster
+    st.rerun()

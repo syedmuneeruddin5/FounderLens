@@ -1,6 +1,6 @@
 import streamlit as st
 from ui.intake import render_intake
-from ui.interview import sample_render_interview
+from ui.interview import render_interview
 
 st.set_page_config(
     page_title="FounderLens",
@@ -116,6 +116,12 @@ if "canvas" not in st.session_state:
         "lean_canvas": False,
         "risk_register": False,
         "one_pager": False
+    },
+
+    "audio_generated": {
+        "skeptical_vc": False,
+        "target_customer": False,
+        "fellow_founder": False
     }
 }
     
@@ -123,9 +129,12 @@ if "canvas" not in st.session_state:
 if st.session_state.canvas["stage"] == "intake":
     render_intake()
 elif st.session_state.canvas["stage"] == "interview":
-    sample_render_interview()
+    render_interview()
 elif st.session_state.canvas["stage"] == "synthesis":
     st.write("Synthesis Stage")
+    st.write(st.session_state.canvas["conversation_history"])
+    st.write(st.session_state.canvas)
+    st.write(st.session_state.completed_clusters)
 elif st.session_state.canvas["stage"] == "review":
     st.write("Review Stage")
 elif st.session_state.canvas["stage"] == "complete":
